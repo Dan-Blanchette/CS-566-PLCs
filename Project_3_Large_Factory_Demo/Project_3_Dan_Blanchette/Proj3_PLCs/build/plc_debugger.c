@@ -1,0 +1,993 @@
+/*
+ * DEBUGGER code
+ * 
+ * On "publish", when buffer is free, debugger stores arbitrary variables 
+ * content into, and mark this buffer as filled
+ * 
+ * 
+ * Buffer content is read asynchronously, (from non real time part), 
+ * and then buffer marked free again.
+ *  
+ * 
+ * */
+#ifdef TARGET_DEBUG_AND_RETAIN_DISABLE
+
+void __init_debug    (void){}
+void __cleanup_debug (void){}
+void __retrieve_debug(void){}
+void __publish_debug (void){}
+
+#else
+
+#include "iec_types_all.h"
+#include "POUS.h"
+/*for memcpy*/
+#include <string.h>
+#include <stdio.h>
+
+typedef unsigned int dbgvardsc_index_t;
+typedef unsigned short trace_buf_offset_t;
+
+#define BUFFER_EMPTY 0
+#define BUFFER_FULL 1
+
+#ifndef TARGET_ONLINE_DEBUG_DISABLE
+
+#define TRACE_BUFFER_SIZE 4096
+#define TRACE_LIST_SIZE 1024
+
+/* Atomically accessed variable for buffer state */
+static long trace_buffer_state = BUFFER_EMPTY;
+
+typedef struct trace_item_s {
+    dbgvardsc_index_t dbgvardsc_index;
+} trace_item_t;
+
+trace_item_t trace_list[TRACE_LIST_SIZE];
+char trace_buffer[TRACE_BUFFER_SIZE];
+
+/* Trace's cursor*/
+static trace_item_t *trace_list_collect_cursor = trace_list;
+static trace_item_t *trace_list_addvar_cursor = trace_list;
+static const trace_item_t *trace_list_end = 
+    &trace_list[TRACE_LIST_SIZE-1];
+static char *trace_buffer_cursor = trace_buffer;
+static const char *trace_buffer_end = trace_buffer + TRACE_BUFFER_SIZE;
+
+
+
+#define FORCE_BUFFER_SIZE 1024
+#define FORCE_LIST_SIZE 256
+
+typedef struct force_item_s {
+    dbgvardsc_index_t dbgvardsc_index;
+    void *value_pointer_backup;
+} force_item_t;
+
+force_item_t force_list[FORCE_LIST_SIZE];
+char force_buffer[FORCE_BUFFER_SIZE];
+
+/* Force's cursor*/
+static force_item_t *force_list_apply_cursor = force_list;
+static force_item_t *force_list_addvar_cursor = force_list;
+static const force_item_t *force_list_end = 
+    &force_list[FORCE_LIST_SIZE-1];
+static char *force_buffer_cursor = force_buffer;
+static const char *force_buffer_end = force_buffer + FORCE_BUFFER_SIZE;
+
+
+#endif
+
+/***
+ * Declare programs 
+ **/
+extern BIGPROJV1 RES0__INSTANCE0;
+
+/***
+ * Declare global variables from resources and conf 
+ **/
+extern       BIGPROJV1   RES0__INSTANCE0;
+
+typedef const struct {
+    void *ptr;
+    __IEC_types_enum type;
+} dbgvardsc_t;
+
+static const dbgvardsc_t dbgvardsc[] = {
+{&(RES0__INSTANCE0.FACTORYIORESET), BOOL_ENUM},
+{&(RES0__INSTANCE0.ESTOP), BOOL_ENUM},
+{&(RES0__INSTANCE0.STARTBUTTON), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS0_BOOL0), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS0_BOOL1), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS0_BOOL2), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS0_BOOL3), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFF0), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC0_OPENED), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC1_OPENED), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC2_OPENED), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC0_BUSY), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC1_BUSY), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC2_BUSY), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC0_HASERROR), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC1_HASERROR), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC2_HASERROR), BOOL_ENUM},
+{&(RES0__INSTANCE0.SELECTOR0_STATE0_OFF), BOOL_ENUM},
+{&(RES0__INSTANCE0.SELECTOR0_STATE1_ON), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO0), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO2), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO3), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO4), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFFUSE_3), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFFUSE_4), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFFUSE_5), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS1_BOOL0), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS1_BOOL1), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS1_BOOL2), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS1_BOOL3), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS2_BOOL0), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS2_BOOL1), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS2_BOOL2), BOOL_ENUM},
+{&(RES0__INSTANCE0.VIS2_BOOL3), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFF1), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFF2), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_DETECT), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_XMOVE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_ZMOVE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_ROTATING), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_DETECT), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_XMOVE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_ZMOVE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_ROTATING), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_DETECT), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_XMOVE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_ZMOVE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_ROTATING), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_GRIPPER_ROTATE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_GRIPPER_ROTATE), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_GRIPPER_ROTATE), BOOL_ENUM},
+{&(RES0__INSTANCE0.BACK_LIM_PUSHER0), BOOL_ENUM},
+{&(RES0__INSTANCE0.BACK_LIM_PUSHER1), BOOL_ENUM},
+{&(RES0__INSTANCE0.BACK_LIM_PUSHER2), BOOL_ENUM},
+{&(RES0__INSTANCE0.FRONT_LIM_PUSHER0), BOOL_ENUM},
+{&(RES0__INSTANCE0.FRONT_LIM_PUSHER1), BOOL_ENUM},
+{&(RES0__INSTANCE0.FRONT_LIM_PUSHER2), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO8), BOOL_ENUM},
+{&(RES0__INSTANCE0.RETRO5), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIFFUSE_6), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_0), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_1), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_2), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_3), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_4), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_5), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_4M_0), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_4M_2), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_4M_4), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_4M_5), BOOL_ENUM},
+{&(RES0__INSTANCE0.CURVED_CONV0_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.CURVED_CONV1_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.CURVED_CONV2_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.STOP_MC0), BOOL_ENUM},
+{&(RES0__INSTANCE0.STOP_MC1), BOOL_ENUM},
+{&(RES0__INSTANCE0.STOP_MC2), BOOL_ENUM},
+{&(RES0__INSTANCE0.RESET_MC0), BOOL_ENUM},
+{&(RES0__INSTANCE0.RESET_MC1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RESET_MC2), BOOL_ENUM},
+{&(RES0__INSTANCE0.START_MC0), BOOL_ENUM},
+{&(RES0__INSTANCE0.START_MC1), BOOL_ENUM},
+{&(RES0__INSTANCE0.START_MC2), BOOL_ENUM},
+{&(RES0__INSTANCE0.PIV_ARM0_TURN), BOOL_ENUM},
+{&(RES0__INSTANCE0.PIV_ARM1_TURN), BOOL_ENUM},
+{&(RES0__INSTANCE0.PIV_ARM0_BELT_PLUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.PIV_ARM1_BELT_PLUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.PIV_ARM0_BELT_MINUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.PIV_ARM1_BELT_MINUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.PUSHER0), BOOL_ENUM},
+{&(RES0__INSTANCE0.PUSHER1), BOOL_ENUM},
+{&(RES0__INSTANCE0.PUSHER2), BOOL_ENUM},
+{&(RES0__INSTANCE0.SPUR_CONV0_PLUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.SPUR_CONV1_PLUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.SPUR_CONV0_MINUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.SPUR_CONV1_MINUS), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_X), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_X), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_X), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_Z), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_Z), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_Z), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_GRAB), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_GRAB), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_GRAB), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_ROT_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_ROT_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_ROT_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_GRIPPER_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_GRIPPER_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_GRIPPER_CW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_ROT_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_ROT_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_ROT_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP0_GRIPPER_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_GRIPPER_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP2_GRIPPER_CCW), BOOL_ENUM},
+{&(RES0__INSTANCE0.STARTBUTTONLIGHT), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_6), BOOL_ENUM},
+{&(RES0__INSTANCE0.BLUE_LIGHT), BOOL_ENUM},
+{&(RES0__INSTANCE0.GREEN_LIGHT), BOOL_ENUM},
+{&(RES0__INSTANCE0.YELLOW_LIGHT), BOOL_ENUM},
+{&(RES0__INSTANCE0.STOPBLADE0), BOOL_ENUM},
+{&(RES0__INSTANCE0.STOPBLADE1), BOOL_ENUM},
+{&(RES0__INSTANCE0.STOPBLADE2), BOOL_ENUM},
+{&(RES0__INSTANCE0.CONV_2M_7), BOOL_ENUM},
+{&(RES0__INSTANCE0.DIGITAL_DISP0), INT_ENUM},
+{&(RES0__INSTANCE0.DIGITAL_DISP1), INT_ENUM},
+{&(RES0__INSTANCE0.DIGITAL_DISP2), INT_ENUM},
+{&(RES0__INSTANCE0.RS0.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS0.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS0.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS0.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS0.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS1.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS1.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS1.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS1.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS1.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.PRESETVALUE_99), INT_ENUM},
+{&(RES0__INSTANCE0.FACTORY_RESET), BOOL_ENUM},
+{&(RES0__INSTANCE0.PNP1_LINE_RESET), BOOL_ENUM},
+{&(RES0__INSTANCE0.MC_MAX_0), BOOL_ENUM},
+{&(RES0__INSTANCE0.RAWGREEN_V0), BOOL_ENUM},
+{&(RES0__INSTANCE0.BADGREEN_V0), BOOL_ENUM},
+{&(RES0__INSTANCE0.RAWMETAL_V0), BOOL_ENUM},
+{&(RES0__INSTANCE0.BADMETAL_V0), BOOL_ENUM},
+{&(RES0__INSTANCE0.RAWBLUE_V0), BOOL_ENUM},
+{&(RES0__INSTANCE0.BADBLUE_V0), BOOL_ENUM},
+{&(RES0__INSTANCE0.BADMETAL_V2), BOOL_ENUM},
+{&(RES0__INSTANCE0.RAWMETAL_V2), BOOL_ENUM},
+{&(RES0__INSTANCE0.RAWBLUE_V1), BOOL_ENUM},
+{&(RES0__INSTANCE0.BADBLUE_V1), BOOL_ENUM},
+{&(RES0__INSTANCE0.GOOD_BLUE), BOOL_ENUM},
+{&(RES0__INSTANCE0.GOOD_GREEN), BOOL_ENUM},
+{&(RES0__INSTANCE0.GOOD_METAL), BOOL_ENUM},
+{&(RES0__INSTANCE0.BAD_BLUE), BOOL_ENUM},
+{&(RES0__INSTANCE0.BAD_GREEN), BOOL_ENUM},
+{&(RES0__INSTANCE0.BAD_METAL), BOOL_ENUM},
+{&(RES0__INSTANCE0.BAD_BLUE_CNT), INT_ENUM},
+{&(RES0__INSTANCE0.GOOD_BLUE_CNT), INT_ENUM},
+{&(RES0__INSTANCE0.RS2.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS2.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS2.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS2.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS2.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS3.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS3.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS3.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS3.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS3.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS4.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS4.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS4.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS4.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS4.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS6.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS6.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS6.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS6.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS6.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS7.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS7.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS7.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS7.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS7.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS5.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS5.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS5.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS5.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS5.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS8.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS8.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS8.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS8.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS8.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS9.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS9.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS9.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS9.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS9.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS10.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS10.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS10.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS10.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS10.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS11.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS11.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS11.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS11.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS11.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS13.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS13.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS13.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS13.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS13.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS12.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS12.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS12.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS12.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS12.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS14.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS14.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS14.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS14.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS14.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS15.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS15.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS15.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS15.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS15.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS16.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS16.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS16.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS16.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS16.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.L_D), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS17.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS17.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS17.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS17.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS17.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS18.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS18.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS18.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS18.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS18.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS19.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS19.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS19.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS19.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS19.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.VARTIME1), TIME_ENUM},
+{&(RES0__INSTANCE0.VARTIME2), TIME_ENUM},
+{&(RES0__INSTANCE0.VARTIME3), TIME_ENUM},
+{&(RES0__INSTANCE0.VARTIME4), TIME_ENUM},
+{&(RES0__INSTANCE0.VARTIME5), TIME_ENUM},
+{&(RES0__INSTANCE0.VARTIME6), TIME_ENUM},
+{&(RES0__INSTANCE0.VARTIME7), TIME_ENUM},
+{&(RES0__INSTANCE0.PNPHASITEM), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS25.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS25.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS25.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS25.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS25.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS27.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS27.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS27.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS27.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS27.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.CU), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.R), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.PV), INT_ENUM},
+{&(RES0__INSTANCE0.CTU0.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.CV), INT_ENUM},
+{&(RES0__INSTANCE0.CTU0.CU_T.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.CU_T.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.CU_T.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.CU_T.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU0.CU_T.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON3.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON3.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON3.IN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON3.PT), TIME_ENUM},
+{&(RES0__INSTANCE0.TON3.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON3.ET), TIME_ENUM},
+{&(RES0__INSTANCE0.TON3.STATE), SINT_ENUM},
+{&(RES0__INSTANCE0.TON3.PREV_IN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON3.CURRENT_TIME), TIME_ENUM},
+{&(RES0__INSTANCE0.TON3.START_TIME), TIME_ENUM},
+{&(RES0__INSTANCE0.TON5.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON5.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON5.IN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON5.PT), TIME_ENUM},
+{&(RES0__INSTANCE0.TON5.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON5.ET), TIME_ENUM},
+{&(RES0__INSTANCE0.TON5.STATE), SINT_ENUM},
+{&(RES0__INSTANCE0.TON5.PREV_IN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON5.CURRENT_TIME), TIME_ENUM},
+{&(RES0__INSTANCE0.TON5.START_TIME), TIME_ENUM},
+{&(RES0__INSTANCE0.RS26.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS26.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS26.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS26.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS26.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS28.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS28.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS28.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS28.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS28.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS29.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS29.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS29.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS29.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS29.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS38.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS38.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS38.S), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS38.R1), BOOL_ENUM},
+{&(RES0__INSTANCE0.RS38.Q1), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.CU), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.R), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.PV), INT_ENUM},
+{&(RES0__INSTANCE0.CTU1.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.CV), INT_ENUM},
+{&(RES0__INSTANCE0.CTU1.CU_T.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.CU_T.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.CU_T.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.CU_T.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU1.CU_T.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.CU), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.R), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.PV), INT_ENUM},
+{&(RES0__INSTANCE0.CTU2.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.CV), INT_ENUM},
+{&(RES0__INSTANCE0.CTU2.CU_T.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.CU_T.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.CU_T.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.CU_T.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.CTU2.CU_T.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON0.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON0.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON0.IN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON0.PT), TIME_ENUM},
+{&(RES0__INSTANCE0.TON0.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON0.ET), TIME_ENUM},
+{&(RES0__INSTANCE0.TON0.STATE), SINT_ENUM},
+{&(RES0__INSTANCE0.TON0.PREV_IN), BOOL_ENUM},
+{&(RES0__INSTANCE0.TON0.CURRENT_TIME), TIME_ENUM},
+{&(RES0__INSTANCE0.TON0.START_TIME), TIME_ENUM},
+{&(RES0__INSTANCE0.R_TRIG1.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG1.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG1.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG1.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG1.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG1.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG1.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG1.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG1.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG1.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG2.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG2.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG2.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG2.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG2.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG3.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG3.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG3.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG3.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG3.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG4.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG4.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG4.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG4.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG4.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG5.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG5.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG5.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG5.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG5.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG2.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG2.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG2.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG2.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG2.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG6.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG6.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG6.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG6.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG6.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG7.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG7.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG7.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG7.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG7.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG8.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG8.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG8.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG8.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG8.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG3.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG3.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG3.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG3.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG3.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG4.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG4.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG4.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG4.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG4.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG9.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG9.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG9.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG9.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG9.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG5.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG5.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG5.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG5.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG5.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG6.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG6.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG6.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG6.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG6.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG7.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG7.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG7.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG7.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG7.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG8.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG8.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG8.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG8.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.F_TRIG8.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG10.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG10.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG10.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG10.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG10.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG11.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG11.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG11.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG11.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG11.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG12.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG12.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG12.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG12.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG12.M), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG13.EN), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG13.ENO), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG13.CLK), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG13.Q), BOOL_ENUM},
+{&(RES0__INSTANCE0.R_TRIG13.M), BOOL_ENUM}
+};
+
+static const dbgvardsc_index_t retain_list[] = {
+
+};
+static unsigned int retain_list_collect_cursor = 0;
+static const unsigned int retain_list_size = sizeof(retain_list)/sizeof(dbgvardsc_index_t);
+
+typedef void(*__for_each_variable_do_fp)(dbgvardsc_t*);
+void __for_each_variable_do(__for_each_variable_do_fp fp)
+{
+    unsigned int i;
+    for(i = 0; i < sizeof(dbgvardsc)/sizeof(dbgvardsc_t); i++){
+        dbgvardsc_t *dsc = &dbgvardsc[i];
+        if(dsc->type != UNKNOWN_ENUM) 
+            (*fp)(dsc);
+    }
+}
+
+#define __Unpack_desc_type dbgvardsc_t
+
+
+#define __Unpack_case_t(TYPENAME)                                           \
+        case TYPENAME##_ENUM :                                              \
+            if(flags) *flags = ((__IEC_##TYPENAME##_t *)varp)->flags;       \
+            if(value_p) *value_p = &((__IEC_##TYPENAME##_t *)varp)->value;  \
+		    if(size) *size = sizeof(TYPENAME);                              \
+            break;
+
+#define __Unpack_case_p(TYPENAME)                                           \
+        case TYPENAME##_O_ENUM :                                            \
+        case TYPENAME##_P_ENUM :                                            \
+            if(flags) *flags = ((__IEC_##TYPENAME##_p *)varp)->flags;       \
+            if(value_p) *value_p = ((__IEC_##TYPENAME##_p *)varp)->value;   \
+		    if(size) *size = sizeof(TYPENAME);                              \
+            break;
+
+#define __Is_a_string(dsc) (dsc->type == STRING_ENUM)   ||\
+                           (dsc->type == STRING_P_ENUM) ||\
+                           (dsc->type == STRING_O_ENUM)
+
+static int UnpackVar(__Unpack_desc_type *dsc, void **value_p, char *flags, size_t *size)
+{
+    void *varp = dsc->ptr;
+    /* find data to copy*/
+    switch(dsc->type){
+        __ANY(__Unpack_case_t)
+        __ANY(__Unpack_case_p)
+    default:
+        return 0; /* should never happen */
+    }
+    return 1;
+}
+
+
+
+void Remind(unsigned int offset, unsigned int count, void * p);
+
+extern int CheckRetainBuffer(void);
+extern void InitRetain(void);
+
+void __init_debug(void)
+{
+    /* init local static vars */
+#ifndef TARGET_ONLINE_DEBUG_DISABLE
+    trace_buffer_cursor = trace_buffer;
+    trace_list_addvar_cursor = trace_list;
+    trace_list_collect_cursor = trace_list;
+    trace_buffer_state = BUFFER_EMPTY;
+
+    force_buffer_cursor = force_buffer;
+    force_list_addvar_cursor = force_list;
+    force_list_apply_cursor = force_list;
+#endif
+
+    InitRetain();
+    /* Iterate over all variables to fill debug buffer */
+    if(CheckRetainBuffer()){
+        static unsigned int retain_offset = 0;
+        retain_list_collect_cursor = 0;
+
+        /* iterate over retain list */
+        while(retain_list_collect_cursor < retain_list_size){
+            void *value_p = NULL;
+            size_t size;
+            char* next_cursor;
+
+            dbgvardsc_t *dsc = &dbgvardsc[
+                retain_list[retain_list_collect_cursor]];
+
+            UnpackVar(dsc, &value_p, NULL, &size);
+
+            printf("Reminding %d %ld \n", retain_list_collect_cursor, size);
+
+            /* if buffer not full */
+            Remind(retain_offset, size, value_p);
+            /* increment cursor according size*/
+            retain_offset += size;
+
+            retain_list_collect_cursor++;
+        }
+    }else{
+        char mstr[] = "RETAIN memory invalid - defaults used";
+        LogMessage(LOG_WARNING, mstr, sizeof(mstr));
+    }
+}
+
+extern void InitiateDebugTransfer(void);
+extern void CleanupRetain(void);
+
+extern unsigned long __tick;
+
+void __cleanup_debug(void)
+{
+#ifndef TARGET_ONLINE_DEBUG_DISABLE
+    trace_buffer_cursor = trace_buffer;
+    InitiateDebugTransfer();
+#endif    
+
+    CleanupRetain();
+}
+
+void __retrieve_debug(void)
+{
+}
+
+void Retain(unsigned int offset, unsigned int count, void * p);
+
+/* Return size of all retain variables */
+unsigned int GetRetainSize(void)
+{
+    unsigned int retain_size = 0;
+    retain_list_collect_cursor = 0;
+
+    /* iterate over retain list */
+    while(retain_list_collect_cursor < retain_list_size){
+        void *value_p = NULL;
+        size_t size;
+        char* next_cursor;
+
+        dbgvardsc_t *dsc = &dbgvardsc[
+            retain_list[retain_list_collect_cursor]];
+
+        UnpackVar(dsc, &value_p, NULL, &size);
+
+        retain_size += size;
+        retain_list_collect_cursor++;
+    }
+
+    printf("Retain size %d \n", retain_size);
+            
+    return retain_size;
+}
+
+
+extern void PLC_GetTime(IEC_TIME*);
+extern int TryEnterDebugSection(void);
+extern long AtomicCompareExchange(long*, long, long);
+extern long long AtomicCompareExchange64(long long* , long long , long long);
+extern void LeaveDebugSection(void);
+extern void ValidateRetainBuffer(void);
+extern void InValidateRetainBuffer(void);
+
+#define __ReForceOutput_case_p(TYPENAME)                                                            \
+        case TYPENAME##_P_ENUM :                                                                    \
+        case TYPENAME##_O_ENUM :                                                                    \
+            {                                                                                       \
+                char *next_cursor = force_buffer_cursor + sizeof(TYPENAME);                         \
+                if(next_cursor <= force_buffer_end ){                                               \
+                    /* outputs real value must be systematically forced */                          \
+                    if(vartype == TYPENAME##_O_ENUM)                                                \
+                        /* overwrite value pointed by backup */                                     \
+                        *((TYPENAME *)force_list_apply_cursor->value_pointer_backup) =  \
+                            *((TYPENAME *)force_buffer_cursor);                                     \
+                    /* inc force_buffer cursor */                                                   \
+                    force_buffer_cursor = next_cursor;                                              \
+                }else{                                                                              \
+                    stop = 1;                                                                       \
+                }                                                                                   \
+            }                                                                                       \
+            break;
+void __publish_debug(void)
+{
+    InValidateRetainBuffer();
+    
+#ifndef TARGET_ONLINE_DEBUG_DISABLE 
+    /* Check there is no running debugger re-configuration */
+    if(TryEnterDebugSection()){
+        /* Lock buffer */
+        long latest_state = AtomicCompareExchange(
+            &trace_buffer_state,
+            BUFFER_EMPTY,
+            BUFFER_FULL);
+            
+        /* If buffer was free */
+        if(latest_state == BUFFER_EMPTY)
+        {
+            int stop = 0;
+            /* Reset force list cursor */
+            force_list_apply_cursor = force_list;
+
+            /* iterate over force list */
+            while(!stop && force_list_apply_cursor < force_list_addvar_cursor){
+                dbgvardsc_t *dsc = &dbgvardsc[
+                    force_list_apply_cursor->dbgvardsc_index];
+                void *varp = dsc->ptr;
+                __IEC_types_enum vartype = dsc->type;
+                switch(vartype){
+                    __ANY(__ReForceOutput_case_p)
+                default:
+                    break;
+                }
+                force_list_apply_cursor++;                                                      \
+            }
+
+            /* Reset buffer cursor */
+            trace_buffer_cursor = trace_buffer;
+            /* Reset trace list cursor */
+            trace_list_collect_cursor = trace_list;
+
+            /* iterate over trace list */
+            while(trace_list_collect_cursor < trace_list_addvar_cursor){
+                void *value_p = NULL;
+                size_t size;
+                char* next_cursor;
+
+                dbgvardsc_t *dsc = &dbgvardsc[
+                    trace_list_collect_cursor->dbgvardsc_index];
+
+                UnpackVar(dsc, &value_p, NULL, &size);
+
+                /* copy visible variable to buffer */;
+                if(__Is_a_string(dsc)){
+                    /* optimization for strings */
+                    /* assume NULL terminated strings */
+                    size = ((STRING*)value_p)->len + 1;
+                }
+
+                /* compute next cursor positon.*/
+                next_cursor = trace_buffer_cursor + size;
+                /* check for buffer overflow */
+                if(next_cursor < trace_buffer_end)
+                    /* copy data to the buffer */
+                    memcpy(trace_buffer_cursor, value_p, size);
+                else
+                    /* stop looping in case of overflow */
+                    break;
+                /* increment cursor according size*/
+                trace_buffer_cursor = next_cursor;
+                trace_list_collect_cursor++;
+            }
+            
+            /* Leave debug section,
+             * Trigger asynchronous transmission 
+             * (returns immediately) */
+            InitiateDebugTransfer(); /* size */
+        }
+        LeaveDebugSection();
+    }
+#endif
+    static unsigned int retain_offset = 0;
+    /* when not debugging, do only retain */
+    retain_list_collect_cursor = 0;
+
+    /* iterate over retain list */
+    while(retain_list_collect_cursor < retain_list_size){
+        void *value_p = NULL;
+        size_t size;
+        char* next_cursor;
+
+        dbgvardsc_t *dsc = &dbgvardsc[
+            retain_list[retain_list_collect_cursor]];
+
+        UnpackVar(dsc, &value_p, NULL, &size);
+
+        /* if buffer not full */
+        Retain(retain_offset, size, value_p);
+        /* increment cursor according size*/
+        retain_offset += size;
+
+        retain_list_collect_cursor++;
+    }
+    ValidateRetainBuffer();
+}
+
+#ifndef TARGET_ONLINE_DEBUG_DISABLE
+
+#define TRACE_LIST_OVERFLOW    1
+#define FORCE_LIST_OVERFLOW    2
+#define FORCE_BUFFER_OVERFLOW  3
+
+#define __ForceVariable_case_t(TYPENAME)                                                \
+        case TYPENAME##_ENUM :                                                          \
+            /* add to force_list*/                                                      \
+            force_list_addvar_cursor->dbgvardsc_index = idx;                            \
+            ((__IEC_##TYPENAME##_t *)varp)->flags |= __IEC_FORCE_FLAG;                  \
+            ((__IEC_##TYPENAME##_t *)varp)->value = *((TYPENAME *)force);               \
+            break;
+#define __ForceVariable_case_p(TYPENAME)                                                \
+        case TYPENAME##_P_ENUM :                                                        \
+        case TYPENAME##_O_ENUM :                                                        \
+            {                                                                           \
+                char *next_cursor = force_buffer_cursor + sizeof(TYPENAME);             \
+                if(next_cursor <= force_buffer_end ){                                   \
+                    /* add to force_list*/                                              \
+                    force_list_addvar_cursor->dbgvardsc_index = idx;                    \
+                    /* save pointer to backup */                                        \
+                    force_list_addvar_cursor->value_pointer_backup =                    \
+                        ((__IEC_##TYPENAME##_p *)varp)->value;                          \
+                    /* store forced value in force_buffer */                            \
+                    *((TYPENAME *)force_buffer_cursor) = *((TYPENAME *)force);          \
+                    /* replace pointer with pointer to force_buffer */                  \
+                    ((__IEC_##TYPENAME##_p *)varp)->value =                             \
+                        (TYPENAME *)force_buffer_cursor;                                \
+                    /* mark variable as forced */                                       \
+                    ((__IEC_##TYPENAME##_p *)varp)->flags |= __IEC_FORCE_FLAG;          \
+                    /* inc force_buffer cursor */                                       \
+                    force_buffer_cursor = next_cursor;                                  \
+                    /* outputs real value must be systematically forced */              \
+                    if(vartype == TYPENAME##_O_ENUM)                                    \
+                        *(((__IEC_##TYPENAME##_p *)varp)->value) = *((TYPENAME *)force);\
+                } else {                                                                \
+                    error_code = FORCE_BUFFER_OVERFLOW;                                 \
+                    goto error_cleanup;                                                 \
+                }                                                                       \
+            }                                                                           \
+            break;
+
+
+void ResetDebugVariables(void);
+
+int RegisterDebugVariable(dbgvardsc_index_t idx, void* force)
+{
+    int error_code = 0;
+    if(idx < sizeof(dbgvardsc)/sizeof(dbgvardsc_t)){
+        /* add to trace_list, inc trace_list_addvar_cursor*/
+        if(trace_list_addvar_cursor <= trace_list_end){
+            trace_list_addvar_cursor->dbgvardsc_index = idx;
+            trace_list_addvar_cursor++;
+        } else {
+            error_code = TRACE_LIST_OVERFLOW;
+            goto error_cleanup;
+        }
+        if(force){
+            if(force_list_addvar_cursor <= force_list_end){
+                dbgvardsc_t *dsc = &dbgvardsc[idx];
+                void *varp = dsc->ptr;
+                __IEC_types_enum vartype = dsc->type;
+
+                switch(vartype){
+                    __ANY(__ForceVariable_case_t)
+                    __ANY(__ForceVariable_case_p)
+                default:
+                    break;
+                }
+                /* inc force_list cursor */
+                force_list_addvar_cursor++;
+            } else {
+                error_code = FORCE_LIST_OVERFLOW;
+                goto error_cleanup;
+            }
+        }
+    }
+    return 0;
+
+error_cleanup:
+    ResetDebugVariables();
+    trace_buffer_state = BUFFER_EMPTY;
+    return error_code;
+    
+}
+
+#define ResetForcedVariable_case_t(TYPENAME)                                            \
+        case TYPENAME##_ENUM :                                                          \
+            ((__IEC_##TYPENAME##_t *)varp)->flags &= ~__IEC_FORCE_FLAG;                 \
+            /* for local variable we don't restore original value */                    \
+            /* that can be added if needed, but it was like that since ever */          \
+            break;
+
+#define ResetForcedVariable_case_p(TYPENAME)                                            \
+        case TYPENAME##_P_ENUM :                                                        \
+        case TYPENAME##_O_ENUM :                                                        \
+            ((__IEC_##TYPENAME##_p *)varp)->flags &= ~__IEC_FORCE_FLAG;                 \
+            /* restore backup to pointer */                                             \
+            ((__IEC_##TYPENAME##_p *)varp)->value =                                     \
+                force_list_apply_cursor->value_pointer_backup;                          \
+            break;
+
+void ResetDebugVariables(void)
+{
+    /* Reset trace list */
+    trace_list_addvar_cursor = trace_list;
+
+    force_list_apply_cursor = force_list;
+    /* Restore forced variables */
+    while(force_list_apply_cursor < force_list_addvar_cursor){
+        dbgvardsc_t *dsc = &dbgvardsc[
+            force_list_apply_cursor->dbgvardsc_index];
+        void *varp = dsc->ptr;
+        switch(dsc->type){
+            __ANY(ResetForcedVariable_case_t)
+            __ANY(ResetForcedVariable_case_p)
+        default:
+            break;
+        }
+        /* inc force_list cursor */
+        force_list_apply_cursor++;
+    } /* else TODO: warn user about failure to force */ 
+
+    /* Reset force list */
+    force_list_addvar_cursor = force_list;
+    /* Reset force buffer */
+    force_buffer_cursor = force_buffer;
+}
+
+void FreeDebugData(void)
+{
+    /* atomically mark buffer as free */
+    AtomicCompareExchange(
+        &trace_buffer_state,
+        BUFFER_FULL,
+        BUFFER_EMPTY);
+}
+int WaitDebugData(unsigned long *tick);
+/* Wait until debug data ready and return pointer to it */
+int GetDebugData(unsigned long *tick, unsigned long *size, void **buffer){
+    int wait_error = WaitDebugData(tick);
+    if(!wait_error){
+        *size = trace_buffer_cursor - trace_buffer;
+        *buffer = trace_buffer;
+    }
+    return wait_error;
+}
+#endif
+#endif
+
